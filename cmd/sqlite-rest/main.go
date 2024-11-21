@@ -19,18 +19,12 @@ import (
 )
 
 type Config struct {
-	DBPath          string
-	Port            int
-	Host            string
-	Mode            string
-	CacheSize       int
-	PageSize        int
-	JournalMode     string
-	SynchronousMode string
-	TempStore       string
-	MMapSize        int
-	CacheShared     bool
-	ReadUncommitted bool
+	DBPath   string
+	Port     int
+	Host     string
+	Mode     string
+	Username string
+	Password string
 }
 
 type TableInfo struct {
@@ -60,8 +54,17 @@ func parseConfig() (*Config, error) {
 	flag.IntVar(&config.Port, "port", 8080, "Port to run the server on")
 	flag.StringVar(&config.Host, "host", "0.0.0.0", "Host address to bind to")
 	flag.StringVar(&config.Mode, "mode", "release", "Server mode (debug/release)")
+	flag.StringVar(&config.Username, "username", "", "Basic auth username")
+	flag.StringVar(&config.Password, "password", "", "Basic auth password")
 
 	flag.Parse()
+
+	if envUsername := os.Getenv("SQLITE_REST_USERNAME"); envUsername != "" {
+		config.Username = envUsername
+	}
+	if envPassword := os.Getenv("SQLITE_REST_PASSWORD"); envPassword != "" {
+		config.Password = envPassword
+	}
 
 	if err := validateConfig(config); err != nil {
 		return nil, err
@@ -99,6 +102,26 @@ func configureDatabase(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func (s *APIServer) authMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Skip auth if no credentials are configured
+		if s.config.Username == "" && s.config.Password == "" {
+			c.Next()
+			return
+		}
+
+		username, password, hasAuth := c.Request.BasicAuth()
+
+		if !hasAuth || username != s.config.Username || password != s.config.Password {
+			c.Header("WWW-Authenticate", "Basic realm=Authorization Required")
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+			return
+		}
+
+		c.Next()
+	}
 }
 
 func NewAPIServer(config *Config) (*APIServer, error) {
@@ -181,6 +204,8 @@ func (s *APIServer) loadTableInfo() error {
 }
 
 func (s *APIServer) setupRoutes() {
+	s.router.Use(s.authMiddleware())
+
 	s.router.GET("/", s.handleAPIInfo)
 
 	for _, table := range s.tables {
@@ -360,6 +385,7 @@ func (s *APIServer) logStartup() {
 	log.Printf("Mode: %s", s.config.Mode)
 	log.Printf("Address: %s:%d", s.config.Host, s.config.Port)
 	log.Printf("Database: %s", s.config.DBPath)
+	log.Printf("Auth Enabled: %v", s.config.Username != "" || s.config.Password != "")
 
 	pragmas := []string{
 		"cache_size", "page_size", "journal_mode", "synchronous",
